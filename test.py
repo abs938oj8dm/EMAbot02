@@ -4,169 +4,194 @@ import ccxt
 from datetime import datetime
 import json
 import matplotlib.pyplot as plt
-from mpl_finance import candlestick2_ohlc,volume_overlay
-import math
 import numpy as np
 import pandas as pd
 import requests
-#from scipy.stats import linregress
-#import talib
 import time
+from pprint import pprint
 
 #price
-def get_price(min,n):
+def create_df(min,i):
     while True:
         try:
             now = datetime.utcnow()
             unixtime = calendar.timegm(now.utctimetuple())
-            since = unixtime - p_time
+            since = unixtime - 60 * 60 * 3
             query = {"period": str(min),"after": str(since),"before": str(unixtime)}
             data = json.loads(requests.get("https://api.cryptowat.ch/markets/bitflyer/btcfxjpy/ohlc",params=query).text)
-            return { "time" : data["result"][str(min)][n][0],
-                "open" : data["result"][str(min)][n][1],
-                "high" : data["result"][str(min)][n][2],
-	            "low" : data["result"][str(min)][n][3],
-                "close" : data["result"][str(min)][n][4]},data
+            ticker = bitflyer.fetch_ticker('BTC/JPY', params = { "product_code" : "FX_BTC_JPY" })
+            for n in [str(min)]:
+                row = data["result"][str(n)]
+                df = pd.DataFrame(row,
+                                columns=['time',
+                                        'open',
+                                        'high', 
+                                        'low', 
+                                        'close', 
+                                        'price', 
+                                        'volume'])
+            df['time_id'] = df.index + 1
+            return {"time" : data["result"][str(min)][i][0],
+                "open" : data["result"][str(min)][i][1],
+                "high" : data["result"][str(min)][i][2],
+		        "low" : data["result"][str(min)][i][3],
+                "close": data["result"][str(min)][i][4],
+                "price": data["result"][str(min)][i][5],
+                "volume": data["result"][str(min)][i][6]},ticker,df
+
         except Exception as e:
             print("価格の取得に失敗しました(;_;)")
             print("error_code: " + str(e.args))
             time.sleep(10)
-#DataFrame
-def create_df():
-    for n in [str(period)]:
-        row = full_data["result"][str(n)]
-        df = pd.DataFrame(row,
-                        columns=['exectime', 
-                                'open', 
-                                'high', 
-                                'low', 
-                                'close', 
-                                'price', 
-                                'volume'])
-    df['time_id'] = df.index + 1
-    return df
 #Technical
-def EMA(EMA_period,old,new):
-    df = create_df()
+def SMA(df,EMA_period):
+    df["sma"] = df['close'].rolling(EMA_period).mean()
+    return df["sma"]
+
+def EMA(df,EMA_period):
     alpha = 2/(EMA_period+1)
-    df["ema"] = df['close'].ewm(alpha=alpha).mean()[-old:-new]
+    df["ema"] = df['close'].ewm(alpha=alpha).mean()
     return df["ema"]
 
-def EMA_check(EMA_period): 
-    UPtrend_angle = 1
-    DWtrend_angle = -1
-    NowAngle = 0
-    for var in range(int(p_time/period)+1,2,-1):
-        df = EMA(EMA_period,var,var-2)
-        df_list = list(df.values.flatten())
-        NowAngle = np.arctan((df_list[int(p_time/period)+2-var]-df_list[int(p_time/period)+1-var]))
-        if NowAngle > UPtrend_angle:
-            flag["trend"] = "buy"
-        elif NowAngle < DWtrend_angle:
-            flag["trend"] = "sell"
-        else:
-            flag["trend"] = None
-    return df_list[int(p_time/period)-1]
+def STD(df,EMA_period):
+    alpha = 2/(EMA_period+1)
+    df["std"] = df['close'].ewm(alpha=alpha).std()
+    return df["std"]
 
-def RSI():
-    df = create_df()
-    diff = df.diff()
-    diff_data = diff[1:]
-    up, down = diff_data.copy(), diff_data.copy()
-    up[up < 0] = 0
-    down[down > 0] = 0
-    up_sma_14 = up.rolling(window=14, center=False).mean()
-    down_sma_14 = down.abs().rolling(window=14, center=False).mean()
-    up_sma_14 = up.rolling(window=14, center=False).mean()
-    down_sma_14 = down.abs().rolling(window=14, center=False).mean()
-    RS = up_sma_14 / down_sma_14
-    RSI = 100.0 - (100.0 / (1.0 + RS))
-    return RSI
+def BBAND():
+    mean = EMA(df,14)
+    sigma = STD(df,14)
+    #plus_sigma1 = round(mean + sigma)
+    #minus_sigma1 = round(mean - sigma)
+    plus_sigma2 = round(mean + 2*sigma)
+    minus_sigma2 = round(mean - 2*sigma)
 
+    return plus_sigma2,minus_sigma2
+
+def DONCHAN(df,ticker):
+    highest = max(df["high"])
+    if ticker["last"] > int(highest):
+        return {"side":"buy","price":highest}
+    lowest = min(df["low"])
+    if ticker["last"] < int(lowest):
+        return {"side":"sell","price":lowest}
+    return {"side" : None , "price":0}
 #order
-def create_position(side):
+def create_Mpos(side):
     try:
         order = bitflyer.create_order(
             symbol = 'BTC/JPY',
             type='market',
             side= side,
-            amount= lot,
+            amount= "0.01",
             params = { "product_code" : "FX_BTC_JPY" })
         print("成行注文しました!!")
-        if side == "buy":
-            flag["message"] = data["close"]
-        elif side == "sell":
-            flag["message"] = data["close"]
-        flag["position"] = side
-        flag["order"] = True
+        flag["position"]["side"] = side
+        flag["position"]["price"] = data["close"]
         time.sleep(10)
         return flag
     except Exception as e:
         print("成行注文に失敗しました(;_;) : " + e.args)
         time.sleep(10)
 
-def close_position(side):
+def close_Mpos(side):
     while True:
         try:
             order = bitflyer.create_order(
 				symbol = 'BTC/JPY',
 				type='market',
 				side= side,
-				amount= lot,
+				amount= "0.01",
 				params = { "product_code" : "FX_BTC_JPY" })
             print("成行決済しました!!")
-            if side == "buy":
-                flag["message"] = data["close"]
-            elif side == "sell":
-                flag["message"] = data["close"]
-            flag["position"] = 0
-            flag["order"] = False
+            flag["position"]["side"] = 0
+            flag["position"]["price"] = 0
             time.sleep(10)
             return flag
         except:
             print("成行決済に失敗しました(;_;)")
             time.sleep(10)
+    
+def close_Lpos(side,price):
+    while True:
+        try:
+            order = bitflyer.create_order(
+				symbol = 'BTC/JPY',
+                type='limit',
+                side=side,
+	            price=price,
+				amount= "0.01",
+				params = { "product_code" : "FX_BTC_JPY" })
+            print("指値決済しました!!")
+            flag["position"]["side"] = 0
+            flag["position"]["price"] = 0
+            time.sleep(10)
+            return flag
+        except:
+            print("指値決済に失敗しました(;_;)")
+            time.sleep(10)
 
-def check_order():
-    if flag["order"] == True:
-        if flag["position"] == 'buy':
-            if short_tmp > EMA_check(long_EMA) > short_data and flag["trend"] == "sell":
-                close_position("sell")
-        elif flag["position"] == 'sell':
-            if short_tmp < EMA_check(long_EMA) < short_data and flag["trend"] == "buy":
-                close_position("buy")
-    else:
-        if short_tmp < EMA_check(long_EMA) < short_data and flag["trend"] == "buy" :
-            create_position("buy")
-        elif short_tmp > EMA_check(long_EMA) > short_data and flag["trend"] == "sell":
-            create_position("sell")
+def check_positions():
+    while True:
+        try:
+            size = []
+            price = []
+            positions = bitflyer.private_get_getpositions( params = { "product_code" : "FX_BTC_JPY" })
+            if not positions:
+                flag["position"]["side"] = 0
+            for pos in positions:
+                size.append(pos["size"])
+                price.append(pos["price"])
+                side = pos["side"]
+			# 平均建値を計算する
+            average_price = round(sum( price[i] * size[i] for i in range(len(price)) ) / sum(size))
+            sum_size = round(sum(size),2)
+            return {"average" : average_price, "price" : sum_size, "side" : side}
+        except ccxt.BaseError as e:
+            print("BitflyerのAPIで問題発生 : ",e)
+            print("20秒待機してやり直します")
+            time.sleep(20)
+
+def check_signal(sp2,sm2,old_p,new_p,df):
+    signal = DONCHAN(df,ticker)
+    if flag["position"]["side"] == 0:
+        if signal["side"] == "buy":
+            create_Mpos("buy")
+            close_Lpos("sell",ticker["close"] - 500)
+
+        elif signal["side"] == "sell":
+            create_Mpos("sell")
+            close_Lpos("buy",ticker["close"] + 500)
+
+    elif flag["position"]["side"] == "buy":
+        if signal["side"] == "sell":
+            close_Mpos("sell")
         else:
-            print("...............")
-
+            check_positions()
+        
+    elif flag["position"]["side"] == "sell":
+        if signal["side"] == "buy":
+            close_Mpos("buy")
+        else:
+            check_positions()
+        
 #=====================================================#
 
 bitflyer = ccxt.bitflyer({
-    
+    'apiKey':'',
+    'secret':''
 })
-p_time = 60 * 60 * 24
-short_EMA = 14
-long_EMA = 25
 period = 60
-lot = "0.01"
 flag = {
-    'position': 0,
+    'position':{
+        'side': 0,
+        'price': 0,
+    },
     'trend': 0,
-    'order': 0,
-    'message':0
 }
-tmp,full_data = get_price(period,-1)
-short_tmp = EMA_check(short_EMA)
-while True:
-    data,full_data = get_price(period,-1)
-    if tmp["time"] != data["time"]:
-        short_data = EMA_check(short_EMA)
-        check_order()
-        tmp_short = short_data
-        tmp = data
-    time.sleep(10)
 
+while True:
+    data,ticker,df = create_df(60,-1)
+    sp2,sm2 = BBAND()
+    check_signal(sp2,sm2,data,ticker["last"],df)
+    time.sleep(10)
